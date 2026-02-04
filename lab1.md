@@ -19,7 +19,7 @@ finally implement `TableHeap` to manage a collection of pages as a table.
 
 ## Logistics
 
-* **Files to Modify:**
+**Files to Modify:**
 * `godb/storage/bitmap.go`
 * `godb/storage/heap_page.go`
 * `godb/storage/page.go`
