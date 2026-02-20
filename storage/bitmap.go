@@ -62,13 +62,34 @@ func (b *Bitmap) LoadBit(i int) bool {
 //
 // Returns the index of the first zero bit found, or -1 if the bitmap is entirely full.
 func (b *Bitmap) FindFirstZero(startHint int) int {
-	for i := 0; i < b.numBits; i++ {
-		ind := (i + startHint) % b.numBits
-		wind := ind / 64
-		bind := ind % 64
-		if (b.words[wind] >> bind & 1) == 0 {
+	if b.numBits <= 0 {
+		return -1
+	}
+	var cword uint64
+	pwind := -1
+	count := 0
+	for count < b.numBits {
+		ind := (startHint + count) % b.numBits
+		wind := ind >> 6
+		if wind != pwind || ind == 0 {
+			// fetch only when necessary
+			cword = b.words[wind] >> (ind % 64)
+			pwind = wind
+			// speed up by skipping cword if it is all 1's
+			if (^cword) == 0 {
+				count += 64
+				continue
+			}
+		}
+
+		if (cword & 1) == 0 {
 			return ind
 		}
+
+		cword >>= 1
+		// pass this bit
+		count += 1
 	}
+
 	return -1
 }
