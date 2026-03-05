@@ -27,15 +27,6 @@ type clockEntry struct {
 // pages to disk when the pool becomes full. Users will need to coordinate concurrent access to pages
 // using page-level latches and metadata (which you should define in page.go). All methods
 // must be thread-safe, as multiple threads will request the same or different pages concurrently.
-//
-// Design summary
-//   - Fixed-size slice of frames.
-//   - Concurrent page table maps PageID -> *PageFrame.
-//   - Clock replacer: compact clockEntry slice (one cache line per frame) for
-//     fast lock-free scanning; atomicHand advances the clock hand.
-//   - Pin count, dirty, ref bit, and evicting flag are in clockEntry (scan) or
-//     PageFrame (content state).
-//   - PageLatch protects Bytes and page identity (pageID).
 type BufferPool struct {
 	numPages int
 	frames   []PageFrame
@@ -85,8 +76,7 @@ func (bp *BufferPool) StorageManager() DBFileManager {
 }
 
 // frameIdx returns the index of frame within bp.frames in O(1) via pointer
-// arithmetic. The frames slice is never reallocated after construction, so the
-// base address is stable for the lifetime of the pool.
+// arithmetic.
 func (bp *BufferPool) frameIdx(frame *PageFrame) int {
 	sz := unsafe.Sizeof(bp.frames[0])
 	base := uintptr(unsafe.Pointer(&bp.frames[0]))
@@ -102,10 +92,6 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 	for {
 		if frame, ok := bp.pageTable.Load(pageID); ok {
 			// Cache hit path.
-			//
-			// We take a short RLock to ensure:
-			//   - the frame is still the same page
-			//   - eviction cannot repurpose the frame while we pin
 			frame.PageLatch.RLock()
 			idx := bp.frameIdx(frame)
 			ce := &bp.clock[idx]
@@ -128,10 +114,9 @@ func (bp *BufferPool) GetPage(pageID common.PageID) (*PageFrame, error) {
 		}
 
 		// victim is returned with:
-		//   - clock[victimIdx].evicting = 1
-		//   - victim.PageLatch held in write mode
-		//   - clock[victimIdx].pinCount == 0
-		//
+		// clock[victimIdx].evicting = 1
+		//   victim.PageLatch held in write mode
+		//  clock[victimIdx].pinCount == 0
 		// Reserve the pageID in the page table to avoid duplicate loads.
 		existing, loaded := bp.pageTable.LoadOrStore(pageID, victim)
 		if loaded {
@@ -268,13 +253,6 @@ func (bp *BufferPool) GetDirtyPageTableSnapshot() map[common.PageID]LSN {
 	panic("unimplemented")
 }
 
-// acquireVictim finds and claims an evictable frame using a lock-free clock scan
-// over the compact clock array. Returns the frame (PageLatch write-locked,
-// clock[idx].evicting=1, clock[idx].pinCount==0) and its index in bp.frames.
-//
-// The lock-free fast path scans bp.clock (compact, cache-line-sized entries) so
-// metadata for all frames fits in L3 cache even for large pools. replacerMu is
-// only acquired on the slow path when every frame appears to be pinned.
 func (bp *BufferPool) acquireVictim() (*PageFrame, int, error) {
 	numPages := bp.numPages
 	frames := bp.frames
@@ -284,10 +262,6 @@ func (bp *BufferPool) acquireVictim() (*PageFrame, int, error) {
 		var candidate *PageFrame
 		candidateIdx := -1
 
-		// Fast path: lock-free scan over the compact clock array.
-		// We load the hand once, advance it locally, and store it back at the
-		// end. Multiple concurrent scanners may overwrite each other's store,
-		// but correctness is guaranteed by the CAS on ce.evicting.
 		localHand := int(bp.atomicHand.Load())
 		for scanned := 0; scanned < 2*numPages; scanned++ {
 			ce := &clock[localHand]
@@ -302,7 +276,7 @@ func (bp *BufferPool) acquireVictim() (*PageFrame, int, error) {
 			}
 
 			// Second chance: atomically read-and-clear refBit.
-			// If it was 1 the frame gets one more round; if 0 try to claim it.
+			// If it was 1 the frame gets one more round if 0 try to claim it.
 			if atomic.SwapUint32(&ce.refBit, 0) != 0 {
 				continue
 			}
